@@ -68,6 +68,7 @@ The Slack platform was added in commit `eaec71f` with basic functionality:
 | `bot_token` | Yes | Slack bot OAuth token |
 | `app_token` | Yes | Slack app-level token for Socket Mode |
 | `allow_from` | No | User allowlist |
+| `allow_bots` | No | Accept bot-authored events (default false); own posts always dropped |
 | `share_session_in_channel` | No | Share session across all users in channel |
 
 ## Architecture Compliance

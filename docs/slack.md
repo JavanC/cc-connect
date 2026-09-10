@@ -173,7 +173,16 @@ type = "slack"
 [projects.platforms.options]
 bot_token = "xoxb-xxxxxxx..."
 app_token = "xapp-xxxxxxx..."
+# allow_from = "U0123ABCD"   # only these Slack user IDs may talk to the agent (unset = everyone)
+# allow_bots = false         # set true to also accept @mentions posted by other Slack bots
 ```
+
+### Letting another bot trigger the agent
+
+By default every event that carries a `bot_id` is ignored, so one bot cannot drive another. Set `allow_bots = true` to accept bot-authored messages. Two guards stay in place:
+
+- `allow_from` is still enforced — add the other bot's **user** ID (`U...`, not its `B...` bot ID) to the list. Leaving `allow_from` open together with `allow_bots = true` lets any bot in the workspace trigger the agent, and cc-connect logs a warning at startup.
+- cc-connect resolves its own user ID via `auth.test` at startup and always drops its own posts, so a reply can never re-enter as a new prompt. If `auth.test` fails while `allow_bots` is on, startup aborts instead of risking a loop.
 
 ### Token Reference
 

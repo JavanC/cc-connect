@@ -196,3 +196,30 @@ func TestProcessSlackFileShares_EmptyMimeBecomesOctetStream(t *testing.T) {
 		t.Fatalf("got %+v", docs)
 	}
 }
+
+func TestShouldDropSender(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowBots bool
+		selfID    string
+		botID     string
+		userID    string
+		want      bool
+	}{
+		{"human, bots off", false, "UME", "", "UHUMAN", false},
+		{"human, bots on", true, "UME", "", "UHUMAN", false},
+		{"missing user is always dropped", true, "UME", "B1", "", true},
+		{"bot, bots off", false, "UME", "B1", "UQM", true},
+		{"bot, bots on", true, "UME", "B1", "UQM", false},
+		{"own reply echoed back, bots on", true, "UME", "B1", "UME", true},
+		{"bot, bots on, self id unknown", true, "", "B1", "UQM", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{allowBots: tt.allowBots, selfUserID: tt.selfID}
+			if got := p.shouldDropSender(tt.botID, tt.userID); got != tt.want {
+				t.Fatalf("shouldDropSender(%q,%q)=%v want %v", tt.botID, tt.userID, got, tt.want)
+			}
+		})
+	}
+}
