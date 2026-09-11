@@ -1053,3 +1053,20 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// Regression: "default" must be passed explicitly, otherwise Claude Code
+// falls back to the user's settings.json defaultMode (e.g. "auto").
+func TestPermissionModeArgs(t *testing.T) {
+	cases := map[string][]string{
+		"":                  nil,
+		"default":           {"--permission-mode", "default"},
+		"auto":              {"--permission-mode", "auto"},
+		"bypassPermissions": {"--permission-mode", "bypassPermissions"},
+	}
+	for mode, want := range cases {
+		got := permissionModeArgs(mode)
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Fatalf("permissionModeArgs(%q) = %v, want %v", mode, got, want)
+		}
+	}
+}

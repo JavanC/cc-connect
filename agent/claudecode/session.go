@@ -216,6 +216,18 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
+// permissionModeArgs returns the --permission-mode flag for the configured
+// mode. The flag is passed for every non-empty mode, including "default":
+// omitting it makes Claude Code fall back to permissions.defaultMode from the
+// user's ~/.claude/settings.json (commonly "auto" or "bypassPermissions"),
+// which silently overrides the mode configured for cc-connect.
+func permissionModeArgs(mode string) []string {
+	if mode == "" {
+		return nil
+	}
+	return []string{"--permission-mode", mode}
+}
+
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
@@ -248,9 +260,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--verbose")
 	}
 
-	if mode != "" && mode != "default" {
-		innerArgs = append(innerArgs, "--permission-mode", mode)
-	}
+	innerArgs = append(innerArgs, permissionModeArgs(mode)...)
 	switch sessionID {
 	case "", core.ContinueSession:
 		// Truly fresh session — no resume, no continue.
