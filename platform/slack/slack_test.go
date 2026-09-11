@@ -229,3 +229,16 @@ func TestShouldDropSender(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSelfMention(t *testing.T) {
+	p := &Platform{selfUserID: "UBOT"}
+	if !p.isSelfMention("<@UBOT> list files") {
+		t.Fatal("expected mention of self to be detected")
+	}
+	if p.isSelfMention("<@UOTHER> hi <@UBOTX>") {
+		t.Fatal("other user IDs must not match")
+	}
+	if (&Platform{}).isSelfMention("<@UBOT> hi") {
+		t.Fatal("unknown self ID must never match")
+	}
+}

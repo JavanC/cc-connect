@@ -108,6 +108,12 @@ func (p *Platform) shouldDropSender(botID, userID, channelID string) bool {
 	return p.selfUserID != "" && userID == p.selfUserID
 }
 
+// isSelfMention reports whether text contains an @mention of this bot. It
+// returns false when the bot's own user ID is unknown (auth.test failed).
+func (p *Platform) isSelfMention(text string) bool {
+	return p.selfUserID != "" && strings.Contains(text, "<@"+p.selfUserID+">")
+}
+
 // normalizeSessionScope resolves the configured session_scope option to one of
 // "user" | "channel" | "thread". For backward compatibility, when session_scope
 // is unset, share_session_in_channel = true maps to "channel"; otherwise the
@@ -291,6 +297,14 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 			case *slackevents.MessageEvent:
 				if p.shouldDropSender(ev.BotID, ev.User, ev.Channel) {
+					return
+				}
+				// A channel message that @mentions us is also delivered as an
+				// app_mention event, which is the one we act on. Skip it here so
+				// the same prompt is not processed twice. DMs never produce an
+				// app_mention, so they are always handled by this branch.
+				if ev.ChannelType != "im" && p.isSelfMention(ev.Text) {
+					slog.Debug("slack: skipping channel message that duplicates an app_mention", "channel", ev.Channel, "ts", ev.TimeStamp)
 					return
 				}
 
