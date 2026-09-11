@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,24 +32,26 @@ type replyContext struct {
 }
 
 type Platform struct {
-	botToken         string
-	appToken         string
-	allowFrom        string
-	allowBots        bool            // accept messages posted by other Slack bots (still subject to allow_from)
-	allowBotsChans   map[string]bool // when non-empty, bot-authored events are accepted only in these channel IDs
-	selfUserID       string          // this bot's own user ID, resolved via auth.test in Start; used to drop self-echo
-	richText         bool            // render replies as Block Kit rich_text (native lists/quotes/code) in addition to mrkdwn text
-	requireMention   bool            // in channels, act on un-mentioned messages only inside threads the bot is already part of
-	activeThreads    sync.Map        // "channel:threadTS" -> struct{}; threads the bot was mentioned in or replied to
-	lastPost         sync.Map        // "channel:threadTS" -> ts of the bot's most recent post in that thread
-	sessionScope     string          // "user" (default) | "channel" | "thread"
-	client           *slack.Client
-	socket           *socketmode.Client
-	handler          core.MessageHandler
-	cancel           context.CancelFunc
-	channelNameCache map[string]string
-	channelCacheMu   sync.RWMutex
-	userNameCache    sync.Map // userID -> display name
+	botToken          string
+	appToken          string
+	allowFrom         string
+	allowBots         bool            // accept messages posted by other Slack bots (still subject to allow_from)
+	allowBotsChans    map[string]bool // when non-empty, bot-authored events are accepted only in these channel IDs
+	selfUserID        string          // this bot's own user ID, resolved via auth.test in Start; used to drop self-echo
+	richText          bool            // render replies as Block Kit rich_text (native lists/quotes/code) in addition to mrkdwn text
+	requireMention    bool            // in channels, act on un-mentioned messages only inside threads the bot is already part of
+	activeMu          sync.Mutex
+	activeThreads     map[string]int64 // "channel:threadTS" -> unix seconds of last activity; threads the bot was mentioned in or replied to
+	activeThreadsPath string           // persisted copy of activeThreads so require_mention survives restarts; empty = memory only
+	lastPost          sync.Map         // "channel:threadTS" -> ts of the bot's most recent post in that thread
+	sessionScope      string           // "user" (default) | "channel" | "thread"
+	client            *slack.Client
+	socket            *socketmode.Client
+	handler           core.MessageHandler
+	cancel            context.CancelFunc
+	channelNameCache  map[string]string
+	channelCacheMu    sync.RWMutex
+	userNameCache     sync.Map // userID -> display name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -74,6 +78,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		richText = v
 	}
 	requireMention, _ := opts["require_mention"].(bool)
+	dataDir, _ := opts["cc_data_dir"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
@@ -84,17 +89,96 @@ func New(opts map[string]any) (core.Platform, error) {
 			"if your agent runtime is tmux, also set window_per_session=true — " +
 			"without it, concurrent threads share a single pane and their output will interleave")
 	}
-	return &Platform{
-		botToken:         botToken,
-		appToken:         appToken,
-		allowFrom:        allowFrom,
-		allowBots:        allowBots,
-		allowBotsChans:   allowBotsChans,
-		richText:         richText,
-		requireMention:   requireMention,
-		sessionScope:     scope,
-		channelNameCache: make(map[string]string),
-	}, nil
+	p := &Platform{
+		botToken:          botToken,
+		appToken:          appToken,
+		allowFrom:         allowFrom,
+		allowBots:         allowBots,
+		allowBotsChans:    allowBotsChans,
+		richText:          richText,
+		requireMention:    requireMention,
+		sessionScope:      scope,
+		channelNameCache:  make(map[string]string),
+		activeThreads:     make(map[string]int64),
+		activeThreadsPath: activeThreadsPath(dataDir),
+	}
+	if n, err := p.loadActiveThreads(); err != nil {
+		slog.Warn("slack: could not load active threads; starting empty", "path", p.activeThreadsPath, "error", err)
+	} else if n > 0 {
+		slog.Info("slack: loaded active threads", "count", n, "path", p.activeThreadsPath)
+	}
+	return p, nil
+}
+
+// activeThreadRetention bounds how long an idle thread keeps counting as
+// "active" for require_mention; older entries are dropped on load and save.
+const activeThreadRetention = 30 * 24 * time.Hour
+
+func activeThreadsPath(dataDir string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "run", "slack_active_threads.json")
+}
+
+// loadActiveThreads reads the persisted thread set, dropping expired entries.
+// A missing file is not an error. Returns the number of entries loaded.
+func (p *Platform) loadActiveThreads() (int, error) {
+	if p.activeThreadsPath == "" {
+		return 0, nil
+	}
+	raw, err := os.ReadFile(p.activeThreadsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var m map[string]int64
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return 0, err
+	}
+	cutoff := time.Now().Add(-activeThreadRetention).Unix()
+	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+	for k, ts := range m {
+		if ts >= cutoff {
+			p.activeThreads[k] = ts
+		}
+	}
+	return len(p.activeThreads), nil
+}
+
+// saveActiveThreadsLocked writes the thread set atomically (temp file + rename).
+// Caller must hold p.activeMu.
+func (p *Platform) saveActiveThreadsLocked() {
+	if p.activeThreadsPath == "" {
+		return
+	}
+	cutoff := time.Now().Add(-activeThreadRetention).Unix()
+	for k, ts := range p.activeThreads {
+		if ts < cutoff {
+			delete(p.activeThreads, k)
+		}
+	}
+	raw, err := json.Marshal(p.activeThreads)
+	if err != nil {
+		slog.Warn("slack: marshal active threads", "error", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p.activeThreadsPath), 0o755); err != nil {
+		slog.Warn("slack: mkdir for active threads", "error", err)
+		return
+	}
+	tmp := p.activeThreadsPath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		slog.Warn("slack: write active threads", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, p.activeThreadsPath); err != nil {
+		slog.Warn("slack: rename active threads", "error", err)
+	}
 }
 
 // shouldDropSender reports whether an inbound event should be ignored based on
@@ -132,7 +216,20 @@ func (p *Platform) markThreadActive(channel, threadTS string) {
 	if channel == "" || threadTS == "" {
 		return
 	}
-	p.activeThreads.Store(channel+":"+threadTS, struct{}{})
+	key := channel + ":" + threadTS
+	now := time.Now().Unix()
+	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+	if p.activeThreads == nil {
+		p.activeThreads = make(map[string]int64)
+	}
+	prev, seen := p.activeThreads[key]
+	p.activeThreads[key] = now
+	// Persist on first sight and at most once a minute per thread thereafter,
+	// so a chatty thread does not rewrite the file on every message.
+	if !seen || now-prev >= 60 {
+		p.saveActiveThreadsLocked()
+	}
 }
 
 // recordPost remembers the bot's latest message in a thread so the streaming
@@ -161,7 +258,9 @@ func (p *Platform) shouldIgnoreUnmentioned(channelType, channel, threadTS string
 	if threadTS == "" {
 		return true
 	}
-	_, active := p.activeThreads.Load(channel + ":" + threadTS)
+	p.activeMu.Lock()
+	_, active := p.activeThreads[channel+":"+threadTS]
+	p.activeMu.Unlock()
 	return !active
 }
 
@@ -922,5 +1021,8 @@ func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()
 	}
+	p.activeMu.Lock()
+	p.saveActiveThreadsLocked()
+	p.activeMu.Unlock()
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/slack-go/slack/slackevents"
 )
@@ -285,5 +286,34 @@ func TestFinalBelowCard(t *testing.T) {
 	recordPost(&m, "C1", "1.0", "1.2") // e.g. a permission prompt posted below
 	if !c.finalBelowCard() {
 		t.Fatal("something was posted after the card; final must go below")
+	}
+}
+
+func TestActiveThreadsPersistence(t *testing.T) {
+	dir := t.TempDir()
+	p := &Platform{requireMention: true, activeThreads: map[string]int64{}, activeThreadsPath: activeThreadsPath(dir)}
+	p.markThreadActive("C1", "1.000")
+	// expired entry must be dropped on reload
+	p.activeMu.Lock()
+	p.activeThreads["C1:0.001"] = time.Now().Add(-activeThreadRetention - time.Hour).Unix()
+	p.saveActiveThreadsLocked()
+	p.activeMu.Unlock()
+
+	q := &Platform{requireMention: true, activeThreads: map[string]int64{}, activeThreadsPath: p.activeThreadsPath}
+	n, err := q.loadActiveThreads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("loaded %d entries, want 1 (expired one dropped)", n)
+	}
+	if q.shouldIgnoreUnmentioned("group", "C1", "1.000") {
+		t.Fatal("thread persisted across restart must stay active")
+	}
+	if !q.shouldIgnoreUnmentioned("group", "C1", "0.001") {
+		t.Fatal("expired thread must not be active")
+	}
+	if activeThreadsPath("") != "" {
+		t.Fatal("empty data dir must disable persistence")
 	}
 }
