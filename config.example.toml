@@ -1234,6 +1234,7 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"  # Allowed Slack user IDs / 允许的 Slack 用户 ID
 # allow_bots = false  # Also accept messages posted by other Slack bots (their bot user IDs must still pass allow_from;
 #                     # this bot's own replies are always ignored) / 是否接受其他 Slack bot 发来的消息（其 bot 用户 ID 仍需通过 allow_from；自身回复始终忽略）
+# allow_bots_channels = "C0123ABCD,C0456EFGH"  # With allow_bots, accept bot messages only in these channel IDs (empty = any channel) / 仅在这些频道接受 bot 消息（空=所有频道）
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # session_scope = "user"  # Session granularity: "user" (default, per channel+user) |
 #                         # "channel" (one session per channel, same as share_session_in_channel) |

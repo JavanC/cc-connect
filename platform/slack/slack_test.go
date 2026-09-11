@@ -201,24 +201,30 @@ func TestShouldDropSender(t *testing.T) {
 	tests := []struct {
 		name      string
 		allowBots bool
+		chans     map[string]bool
 		selfID    string
 		botID     string
 		userID    string
+		channel   string
 		want      bool
 	}{
-		{"human, bots off", false, "UME", "", "UHUMAN", false},
-		{"human, bots on", true, "UME", "", "UHUMAN", false},
-		{"missing user is always dropped", true, "UME", "B1", "", true},
-		{"bot, bots off", false, "UME", "B1", "UQM", true},
-		{"bot, bots on", true, "UME", "B1", "UQM", false},
-		{"own reply echoed back, bots on", true, "UME", "B1", "UME", true},
-		{"bot, bots on, self id unknown", true, "", "B1", "UQM", false},
+		{"human, bots off", false, nil, "UME", "", "UHUMAN", "CPUB", false},
+		{"human, bots on", true, nil, "UME", "", "UHUMAN", "CPUB", false},
+		{"missing user is always dropped", true, nil, "UME", "B1", "", "CPUB", true},
+		{"bot, bots off", false, nil, "UME", "B1", "UQM", "CPUB", true},
+		{"bot, bots on, no channel restriction", true, nil, "UME", "B1", "UQM", "CPUB", false},
+		{"bot, bots on, in allowed channel", true, map[string]bool{"CPRIV": true}, "UME", "B1", "UQM", "CPRIV", false},
+		{"bot, bots on, outside allowed channel", true, map[string]bool{"CPRIV": true}, "UME", "B1", "UQM", "CPUB", true},
+		{"human unaffected by channel restriction", true, map[string]bool{"CPRIV": true}, "UME", "", "UHUMAN", "CPUB", false},
+		{"own reply echoed back, bots on", true, nil, "UME", "B1", "UME", "CPRIV", true},
+		{"own reply echoed back, in allowed channel", true, map[string]bool{"CPRIV": true}, "UME", "B1", "UME", "CPRIV", true},
+		{"bot, bots on, self id unknown", true, nil, "", "B1", "UQM", "CPRIV", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &Platform{allowBots: tt.allowBots, selfUserID: tt.selfID}
-			if got := p.shouldDropSender(tt.botID, tt.userID); got != tt.want {
-				t.Fatalf("shouldDropSender(%q,%q)=%v want %v", tt.botID, tt.userID, got, tt.want)
+			p := &Platform{allowBots: tt.allowBots, allowBotsChans: tt.chans, selfUserID: tt.selfID}
+			if got := p.shouldDropSender(tt.botID, tt.userID, tt.channel); got != tt.want {
+				t.Fatalf("shouldDropSender(%q,%q,%q)=%v want %v", tt.botID, tt.userID, tt.channel, got, tt.want)
 			}
 		})
 	}

@@ -33,9 +33,10 @@ type Platform struct {
 	botToken         string
 	appToken         string
 	allowFrom        string
-	allowBots        bool   // accept messages posted by other Slack bots (still subject to allow_from)
-	selfUserID       string // this bot's own user ID, resolved via auth.test in Start; used to drop self-echo
-	sessionScope     string // "user" (default) | "channel" | "thread"
+	allowBots        bool            // accept messages posted by other Slack bots (still subject to allow_from)
+	allowBotsChans   map[string]bool // when non-empty, bot-authored events are accepted only in these channel IDs
+	selfUserID       string          // this bot's own user ID, resolved via auth.test in Start; used to drop self-echo
+	sessionScope     string          // "user" (default) | "channel" | "thread"
 	client           *slack.Client
 	socket           *socketmode.Client
 	handler          core.MessageHandler
@@ -51,6 +52,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("slack", allowFrom)
 	allowBots, _ := opts["allow_bots"].(bool)
+	allowBotsChans := map[string]bool{}
+	if raw, _ := opts["allow_bots_channels"].(string); strings.TrimSpace(raw) != "" {
+		for _, id := range strings.Split(raw, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				allowBotsChans[id] = true
+			}
+		}
+	}
 	if allowBots && core.AllowList(allowFrom, "") {
 		// allow_from unset or "*" means every user is permitted; combined with
 		// allow_bots that lets any bot in the workspace drive the agent.
@@ -71,17 +80,19 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:         appToken,
 		allowFrom:        allowFrom,
 		allowBots:        allowBots,
+		allowBotsChans:   allowBotsChans,
 		sessionScope:     scope,
 		channelNameCache: make(map[string]string),
 	}, nil
 }
 
 // shouldDropSender reports whether an inbound event should be ignored based on
-// who posted it. Events without a user ID are always dropped (nothing to check
-// allow_from against). Bot-authored events are dropped unless allow_bots is
-// set; even then this bot's own posts are dropped so a reply can never re-enter
-// as a new prompt and loop.
-func (p *Platform) shouldDropSender(botID, userID string) bool {
+// who posted it and where. Events without a user ID are always dropped (nothing
+// to check allow_from against). Bot-authored events are dropped unless
+// allow_bots is set; when allow_bots_channels is also set they are accepted
+// only in those channels. Even then this bot's own posts are dropped so a reply
+// can never re-enter as a new prompt and loop.
+func (p *Platform) shouldDropSender(botID, userID, channelID string) bool {
 	if userID == "" {
 		return true
 	}
@@ -89,6 +100,9 @@ func (p *Platform) shouldDropSender(botID, userID string) bool {
 		return false
 	}
 	if !p.allowBots {
+		return true
+	}
+	if len(p.allowBotsChans) > 0 && !p.allowBotsChans[channelID] {
 		return true
 	}
 	return p.selfUserID != "" && userID == p.selfUserID
@@ -214,7 +228,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		if data.Type == slackevents.CallbackEvent {
 			switch ev := data.InnerEvent.Data.(type) {
 			case *slackevents.AppMentionEvent:
-				if p.shouldDropSender(ev.BotID, ev.User) {
+				if p.shouldDropSender(ev.BotID, ev.User, ev.Channel) {
 					return
 				}
 
@@ -276,7 +290,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				})
 
 			case *slackevents.MessageEvent:
-				if p.shouldDropSender(ev.BotID, ev.User) {
+				if p.shouldDropSender(ev.BotID, ev.User, ev.Channel) {
 					return
 				}
 
