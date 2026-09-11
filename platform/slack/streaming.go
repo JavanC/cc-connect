@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/chenhg5/cc-connect/core"
-
-	"github.com/slack-go/slack"
 )
 
 // slackPreviewHandle points at the in-flight streaming-preview message so
@@ -26,13 +24,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if !ok {
 		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
-	opts := []slack.MsgOption{
-		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
-	}
-	if rc.timestamp != "" {
-		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: rc.timestamp}))
-	}
-	_, ts, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
+	ts, err := p.postContent(ctx, rc.channel, rc.timestamp, content)
 	if err != nil {
 		return nil, fmt.Errorf("slack: send preview: %w", err)
 	}
@@ -47,10 +39,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("slack: invalid preview handle type %T", previewHandle)
 	}
-	_, _, _, err := p.client.UpdateMessageContext(ctx, h.channel, h.timestamp,
-		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
-	)
-	if err != nil {
+	if err := p.updateContent(ctx, h.channel, h.timestamp, content); err != nil {
 		return fmt.Errorf("slack: update preview: %w", err)
 	}
 	return nil

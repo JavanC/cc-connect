@@ -36,6 +36,7 @@ type Platform struct {
 	allowBots        bool            // accept messages posted by other Slack bots (still subject to allow_from)
 	allowBotsChans   map[string]bool // when non-empty, bot-authored events are accepted only in these channel IDs
 	selfUserID       string          // this bot's own user ID, resolved via auth.test in Start; used to drop self-echo
+	richText         bool            // render replies as Block Kit rich_text (native lists/quotes/code) in addition to mrkdwn text
 	sessionScope     string          // "user" (default) | "channel" | "thread"
 	client           *slack.Client
 	socket           *socketmode.Client
@@ -65,6 +66,10 @@ func New(opts map[string]any) (core.Platform, error) {
 		// allow_bots that lets any bot in the workspace drive the agent.
 		slog.Warn("slack: allow_bots=true with an open allow_from — any bot in the workspace can trigger the agent; set allow_from to the bot user IDs you trust")
 	}
+	richText := true
+	if v, ok := opts["rich_text"].(bool); ok {
+		richText = v
+	}
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
@@ -81,6 +86,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:        allowFrom,
 		allowBots:        allowBots,
 		allowBotsChans:   allowBotsChans,
+		richText:         richText,
 		sessionScope:     scope,
 		channelNameCache: make(map[string]string),
 	}, nil
@@ -520,19 +526,60 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
-
-	opts := []slack.MsgOption{
-		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
-	}
-	if rc.timestamp != "" {
-		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: rc.timestamp}))
-	}
-
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
-	if err != nil {
+	if _, err := p.postContent(ctx, rc.channel, rc.timestamp, content); err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
 	return nil
+}
+
+// renderContent converts agent Markdown into the mrkdwn fallback text plus,
+// when rich_text is enabled, Block Kit rich_text blocks.
+func (p *Platform) renderContent(content string) (string, []slack.Block) {
+	mrkdwn := core.MarkdownToSlackMrkdwn(content)
+	if !p.richText {
+		return mrkdwn, nil
+	}
+	return mrkdwn, MarkdownToRichTextBlocks(content)
+}
+
+// postContent posts agent content as a new message (threaded when threadTS is
+// set). If Slack rejects the rich_text blocks it retries text-only so a
+// rendering edge case never loses the reply.
+func (p *Platform) postContent(ctx context.Context, channel, threadTS, content string) (string, error) {
+	mrkdwn, blocks := p.renderContent(content)
+	return postWithFallback(ctx, p.client, channel, threadTS, mrkdwn, blocks)
+}
+
+// updateContent edits an existing message in place with the same fallback.
+func (p *Platform) updateContent(ctx context.Context, channel, ts, content string) error {
+	mrkdwn, blocks := p.renderContent(content)
+	return updateWithFallback(ctx, p.client, channel, ts, mrkdwn, blocks)
+}
+
+func postWithFallback(ctx context.Context, client *slack.Client, channel, threadTS, mrkdwn string, blocks []slack.Block) (string, error) {
+	opts := messageOptions(mrkdwn, blocks)
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: threadTS}))
+	}
+	_, ts, err := client.PostMessageContext(ctx, channel, opts...)
+	if err != nil && len(blocks) > 0 {
+		slog.Warn("slack: rich_text post rejected; retrying text-only", "error", err)
+		opts = messageOptions(mrkdwn, nil)
+		if threadTS != "" {
+			opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: threadTS}))
+		}
+		_, ts, err = client.PostMessageContext(ctx, channel, opts...)
+	}
+	return ts, err
+}
+
+func updateWithFallback(ctx context.Context, client *slack.Client, channel, ts, mrkdwn string, blocks []slack.Block) error {
+	_, _, _, err := client.UpdateMessageContext(ctx, channel, ts, messageOptions(mrkdwn, blocks)...)
+	if err != nil && len(blocks) > 0 {
+		slog.Warn("slack: rich_text update rejected; retrying text-only", "error", err)
+		_, _, _, err = client.UpdateMessageContext(ctx, channel, ts, messageOptions(mrkdwn, nil)...)
+	}
+	return err
 }
 
 // Send sends a new message (or threaded reply if rctx has timestamp).
@@ -543,15 +590,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
-
-	opts := []slack.MsgOption{
-		slack.MsgOptionText(core.MarkdownToSlackMrkdwn(content), false),
-	}
-	if rc.timestamp != "" {
-		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: rc.timestamp}))
-	}
-	_, _, err := p.client.PostMessageContext(ctx, rc.channel, opts...)
-	if err != nil {
+	if _, err := p.postContent(ctx, rc.channel, rc.timestamp, content); err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
 	return nil

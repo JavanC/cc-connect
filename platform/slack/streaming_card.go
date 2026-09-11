@@ -35,6 +35,7 @@ const slackUpdateMaxText = 3500
 // core.StreamingCard.
 type slackStreamingCard struct {
 	client   *slack.Client
+	rich     bool // render rich_text blocks alongside mrkdwn text
 	channel  string
 	threadTS string
 
@@ -54,34 +55,36 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, rctx any) (core.Stre
 	if !ok {
 		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
-	return &slackStreamingCard{client: p.client, channel: rc.channel, threadTS: rc.timestamp}, nil
+	return &slackStreamingCard{client: p.client, rich: p.richText, channel: rc.channel, threadTS: rc.timestamp}, nil
 }
 
 // postFresh posts a brand-new message — the lazy first post for an unseen
 // card, or the "too long for chat.update" overflow path used by Finalize.
 // Caller must hold c.mu.
-func (c *slackStreamingCard) postFresh(ctx context.Context, rendered string) (string, error) {
-	opts := []slack.MsgOption{slack.MsgOptionText(rendered, false)}
-	if c.threadTS != "" {
-		opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: c.threadTS}))
+func (c *slackStreamingCard) postFresh(ctx context.Context, rendered, content string) (string, error) {
+	return postWithFallback(ctx, c.client, c.channel, c.threadTS, rendered, c.blocks(content))
+}
+
+// blocks converts the raw agent Markdown into rich_text blocks when enabled.
+func (c *slackStreamingCard) blocks(content string) []slack.Block {
+	if !c.rich {
+		return nil
 	}
-	_, ts, err := c.client.PostMessageContext(ctx, c.channel, opts...)
-	return ts, err
+	return MarkdownToRichTextBlocks(content)
 }
 
 // render posts the card on first use, then edits it in place thereafter.
 // Caller must hold c.mu.
-func (c *slackStreamingCard) render(ctx context.Context, rendered string) error {
+func (c *slackStreamingCard) render(ctx context.Context, rendered, content string) error {
 	if c.ts == "" {
-		ts, err := c.postFresh(ctx, rendered)
+		ts, err := c.postFresh(ctx, rendered, content)
 		if err != nil {
 			return err
 		}
 		c.ts = ts
 		return nil
 	}
-	_, _, _, err := c.client.UpdateMessageContext(ctx, c.channel, c.ts, slack.MsgOptionText(rendered, false))
-	return err
+	return updateWithFallback(ctx, c.client, c.channel, c.ts, rendered, c.blocks(content))
 }
 
 // Update renders the latest aggregated content. The first post is immediate;
@@ -110,7 +113,7 @@ func (c *slackStreamingCard) Update(ctx context.Context, content string) error {
 			"size", len(rendered), "limit", slackUpdateMaxText)
 		return nil
 	}
-	if err := c.render(ctx, rendered); err != nil {
+	if err := c.render(ctx, rendered, content); err != nil {
 		slog.Debug("slack: streaming card update failed (will retry on next tick / finalize)", "error", err)
 		return nil
 	}
@@ -142,14 +145,14 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 	if c.ts != "" && len(rendered) > slackUpdateMaxText {
 		slog.Debug("slack: streaming card finalize switching to fresh postMessage (payload exceeds chat.update limit)",
 			"size", len(rendered), "limit", slackUpdateMaxText)
-		if _, err := c.postFresh(ctx, rendered); err != nil {
+		if _, err := c.postFresh(ctx, rendered, content); err != nil {
 			c.failed = true
 			return fmt.Errorf("slack: finalize streaming card: %w", err)
 		}
 		c.lastSent = rendered
 		return nil
 	}
-	if err := c.render(ctx, rendered); err != nil {
+	if err := c.render(ctx, rendered, content); err != nil {
 		c.failed = true
 		return fmt.Errorf("slack: finalize streaming card: %w", err)
 	}
