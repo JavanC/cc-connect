@@ -35,7 +35,8 @@ const slackUpdateMaxText = 3500
 // core.StreamingCard.
 type slackStreamingCard struct {
 	client   *slack.Client
-	rich     bool // render rich_text blocks alongside mrkdwn text
+	rich     bool      // render rich_text blocks alongside mrkdwn text
+	lastPost *sync.Map // shared with Platform: latest bot post per thread
 	channel  string
 	threadTS string
 
@@ -56,14 +57,30 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, rctx any) (core.Stre
 		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 	p.markThreadActive(rc.channel, rc.timestamp)
-	return &slackStreamingCard{client: p.client, rich: p.richText, channel: rc.channel, threadTS: rc.timestamp}, nil
+	return &slackStreamingCard{client: p.client, rich: p.richText, lastPost: &p.lastPost, channel: rc.channel, threadTS: rc.timestamp}, nil
 }
 
 // postFresh posts a brand-new message — the lazy first post for an unseen
 // card, or the "too long for chat.update" overflow path used by Finalize.
 // Caller must hold c.mu.
 func (c *slackStreamingCard) postFresh(ctx context.Context, rendered, content string) (string, error) {
-	return postWithFallback(ctx, c.client, c.channel, c.threadTS, rendered, c.blocks(content))
+	ts, err := postWithFallback(ctx, c.client, c.channel, c.threadTS, rendered, c.blocks(content))
+	if err == nil && c.lastPost != nil {
+		recordPost(c.lastPost, c.channel, c.threadTS, ts)
+	}
+	return ts, err
+}
+
+// finalBelowCard reports whether the final reply should be posted as a new
+// message instead of edited into the card: true when something else (a
+// permission prompt, an interim reply) has been posted in the thread after the
+// card, so an in-place edit would land above the newest messages and the
+// thread would look like it ended on "Allowed, continuing…".
+func (c *slackStreamingCard) finalBelowCard() bool {
+	if c.ts == "" || c.lastPost == nil {
+		return false
+	}
+	return !lastPostIs(c.lastPost, c.channel, c.threadTS, c.ts)
 }
 
 // blocks converts the raw agent Markdown into rich_text blocks when enabled.
@@ -143,6 +160,20 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 	// post a fresh message with the full content instead. This is the in-house
 	// equivalent of "see full reply below" — the partial streaming card stays
 	// visible above the new full-content message.
+	if c.finalBelowCard() {
+		// Collapse the stale in-progress card and deliver the answer at the
+		// bottom of the thread where the reader is looking.
+		note := "✅ 完成 — 最終回覆見下方。"
+		if err := updateWithFallback(ctx, c.client, c.channel, c.ts, note, MarkdownToRichTextBlocks(note)); err != nil {
+			slog.Debug("slack: could not collapse streaming card before final post", "error", err)
+		}
+		if _, err := c.postFresh(ctx, rendered, content); err != nil {
+			c.failed = true
+			return fmt.Errorf("slack: finalize streaming card: %w", err)
+		}
+		c.lastSent = rendered
+		return nil
+	}
 	if c.ts != "" && len(rendered) > slackUpdateMaxText {
 		slog.Debug("slack: streaming card finalize switching to fresh postMessage (payload exceeds chat.update limit)",
 			"size", len(rendered), "limit", slackUpdateMaxText)

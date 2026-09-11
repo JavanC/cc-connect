@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/slack-go/slack/slackevents"
@@ -267,5 +268,22 @@ func TestShouldIgnoreUnmentioned(t *testing.T) {
 	off := &Platform{}
 	if off.shouldIgnoreUnmentioned("group", "CPRIV", "") {
 		t.Fatal("require_mention off must never gate")
+	}
+}
+
+func TestFinalBelowCard(t *testing.T) {
+	var m sync.Map
+	c := &slackStreamingCard{lastPost: &m, channel: "C1", threadTS: "1.0"}
+	if c.finalBelowCard() {
+		t.Fatal("unposted card must edit in place")
+	}
+	c.ts = "1.1"
+	recordPost(&m, "C1", "1.0", "1.1")
+	if c.finalBelowCard() {
+		t.Fatal("card is the latest post; edit in place")
+	}
+	recordPost(&m, "C1", "1.0", "1.2") // e.g. a permission prompt posted below
+	if !c.finalBelowCard() {
+		t.Fatal("something was posted after the card; final must go below")
 	}
 }

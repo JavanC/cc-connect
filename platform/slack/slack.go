@@ -39,6 +39,7 @@ type Platform struct {
 	richText         bool            // render replies as Block Kit rich_text (native lists/quotes/code) in addition to mrkdwn text
 	requireMention   bool            // in channels, act on un-mentioned messages only inside threads the bot is already part of
 	activeThreads    sync.Map        // "channel:threadTS" -> struct{}; threads the bot was mentioned in or replied to
+	lastPost         sync.Map        // "channel:threadTS" -> ts of the bot's most recent post in that thread
 	sessionScope     string          // "user" (default) | "channel" | "thread"
 	client           *slack.Client
 	socket           *socketmode.Client
@@ -132,6 +133,21 @@ func (p *Platform) markThreadActive(channel, threadTS string) {
 		return
 	}
 	p.activeThreads.Store(channel+":"+threadTS, struct{}{})
+}
+
+// recordPost remembers the bot's latest message in a thread so the streaming
+// card can tell whether anything (e.g. a permission prompt) was posted below it.
+func recordPost(m *sync.Map, channel, threadTS, ts string) {
+	if channel == "" || threadTS == "" || ts == "" {
+		return
+	}
+	m.Store(channel+":"+threadTS, ts)
+}
+
+// lastPostIs reports whether ts is still the bot's most recent post in the thread.
+func lastPostIs(m *sync.Map, channel, threadTS, ts string) bool {
+	v, ok := m.Load(channel + ":" + threadTS)
+	return !ok || v.(string) == ts
 }
 
 // shouldIgnoreUnmentioned reports whether a channel message that does not
@@ -561,9 +577,11 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 	p.markThreadActive(rc.channel, rc.timestamp)
-	if _, err := p.postContent(ctx, rc.channel, rc.timestamp, content); err != nil {
+	ts, err := p.postContent(ctx, rc.channel, rc.timestamp, content)
+	if err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
+	recordPost(&p.lastPost, rc.channel, rc.timestamp, ts)
 	return nil
 }
 
@@ -626,9 +644,11 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
 	p.markThreadActive(rc.channel, rc.timestamp)
-	if _, err := p.postContent(ctx, rc.channel, rc.timestamp, content); err != nil {
+	ts, err := p.postContent(ctx, rc.channel, rc.timestamp, content)
+	if err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
+	recordPost(&p.lastPost, rc.channel, rc.timestamp, ts)
 	return nil
 }
 
