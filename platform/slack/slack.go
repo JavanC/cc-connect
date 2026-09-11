@@ -37,6 +37,8 @@ type Platform struct {
 	allowBotsChans   map[string]bool // when non-empty, bot-authored events are accepted only in these channel IDs
 	selfUserID       string          // this bot's own user ID, resolved via auth.test in Start; used to drop self-echo
 	richText         bool            // render replies as Block Kit rich_text (native lists/quotes/code) in addition to mrkdwn text
+	requireMention   bool            // in channels, act on un-mentioned messages only inside threads the bot is already part of
+	activeThreads    sync.Map        // "channel:threadTS" -> struct{}; threads the bot was mentioned in or replied to
 	sessionScope     string          // "user" (default) | "channel" | "thread"
 	client           *slack.Client
 	socket           *socketmode.Client
@@ -70,6 +72,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	if v, ok := opts["rich_text"].(bool); ok {
 		richText = v
 	}
+	requireMention, _ := opts["require_mention"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
@@ -87,6 +90,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowBots:        allowBots,
 		allowBotsChans:   allowBotsChans,
 		richText:         richText,
+		requireMention:   requireMention,
 		sessionScope:     scope,
 		channelNameCache: make(map[string]string),
 	}, nil
@@ -118,6 +122,31 @@ func (p *Platform) shouldDropSender(botID, userID, channelID string) bool {
 // returns false when the bot's own user ID is unknown (auth.test failed).
 func (p *Platform) isSelfMention(text string) bool {
 	return p.selfUserID != "" && strings.Contains(text, "<@"+p.selfUserID+">")
+}
+
+// markThreadActive records that the bot is a participant in a thread, so that
+// with require_mention the thread's follow-up replies keep reaching the agent
+// without a fresh @mention.
+func (p *Platform) markThreadActive(channel, threadTS string) {
+	if channel == "" || threadTS == "" {
+		return
+	}
+	p.activeThreads.Store(channel+":"+threadTS, struct{}{})
+}
+
+// shouldIgnoreUnmentioned reports whether a channel message that does not
+// @mention the bot should be dropped under require_mention. DMs are never
+// gated; thread replies inside a thread the bot is already part of pass so a
+// conversation (and permission answers) can continue without re-mentioning.
+func (p *Platform) shouldIgnoreUnmentioned(channelType, channel, threadTS string) bool {
+	if !p.requireMention || channelType == "im" {
+		return false
+	}
+	if threadTS == "" {
+		return true
+	}
+	_, active := p.activeThreads.Load(channel + ":" + threadTS)
+	return !active
 }
 
 // normalizeSessionScope resolves the configured session_scope option to one of
@@ -263,6 +292,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 
 				threadTS := threadRootTS(ev.ThreadTimeStamp, ev.TimeStamp)
+				p.markThreadActive(ev.Channel, threadTS)
 				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 
 				var shareFiles []slackevents.File
@@ -311,6 +341,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				// app_mention, so they are always handled by this branch.
 				if ev.ChannelType != "im" && p.isSelfMention(ev.Text) {
 					slog.Debug("slack: skipping channel message that duplicates an app_mention", "channel", ev.Channel, "ts", ev.TimeStamp)
+					return
+				}
+				if p.shouldIgnoreUnmentioned(ev.ChannelType, ev.Channel, ev.ThreadTimeStamp) {
+					slog.Debug("slack: ignoring un-mentioned channel message (require_mention)", "channel", ev.Channel, "ts", ev.TimeStamp)
 					return
 				}
 
@@ -526,6 +560,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
+	p.markThreadActive(rc.channel, rc.timestamp)
 	if _, err := p.postContent(ctx, rc.channel, rc.timestamp, content); err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}
@@ -590,6 +625,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
+	p.markThreadActive(rc.channel, rc.timestamp)
 	if _, err := p.postContent(ctx, rc.channel, rc.timestamp, content); err != nil {
 		return fmt.Errorf("slack: send: %w", err)
 	}

@@ -55,6 +55,7 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, rctx any) (core.Stre
 	if !ok {
 		return nil, fmt.Errorf("slack: invalid reply context type %T", rctx)
 	}
+	p.markThreadActive(rc.channel, rc.timestamp)
 	return &slackStreamingCard{client: p.client, rich: p.richText, channel: rc.channel, threadTS: rc.timestamp}, nil
 }
 

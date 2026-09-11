@@ -242,3 +242,30 @@ func TestIsSelfMention(t *testing.T) {
 		t.Fatal("unknown self ID must never match")
 	}
 }
+
+func TestShouldIgnoreUnmentioned(t *testing.T) {
+	p := &Platform{requireMention: true}
+	p.markThreadActive("CPRIV", "1.000")
+	cases := []struct {
+		name                       string
+		channelType, channel, thTS string
+		want                       bool
+	}{
+		{"DM never gated", "im", "DPRIV", "", false},
+		{"top-level channel message dropped", "group", "CPRIV", "", true},
+		{"reply in unknown thread dropped", "group", "CPRIV", "9.999", true},
+		{"reply in active thread passes", "group", "CPRIV", "1.000", false},
+		{"same ts in other channel dropped", "channel", "CPUB", "1.000", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := p.shouldIgnoreUnmentioned(c.channelType, c.channel, c.thTS); got != c.want {
+				t.Fatalf("got %v want %v", got, c.want)
+			}
+		})
+	}
+	off := &Platform{}
+	if off.shouldIgnoreUnmentioned("group", "CPRIV", "") {
+		t.Fatal("require_mention off must never gate")
+	}
+}

@@ -71,6 +71,7 @@ The Slack platform was added in commit `eaec71f` with basic functionality:
 | `allow_bots` | No | Accept bot-authored events (default false); own posts always dropped |
 | `allow_bots_channels` | No | Restrict `allow_bots` to these channel IDs |
 | `rich_text` | No | Render replies as Block Kit rich_text blocks (default true) |
+| `require_mention` | No | In channels, ignore un-mentioned messages except thread replies where the bot is active (default false) |
 | `share_session_in_channel` | No | Share session across all users in channel |
 
 ## Architecture Compliance
